@@ -30,7 +30,7 @@ For example, uncomment the line below when you have a GIF in your repo:
 - **Real-time Visualization:** Watch your OpenCode agents move around their office as they execute tools, search files, and write code.
 - **Cozy Pixel Art Aesthetic:** A calming, gamified view of complex AI orchestration.
 - **Multi-Agent Support:** Visualizes multiple agents (Explore, Scout, etc.) simultaneously in the same shared office space.
-- **Customization (Skins):** Each agent has a custom skin saved in `.opencode/viz-skin.json`.
+- **Customization (Skins):** Each character gets a skin automatically; pin one per project with `.opencode/viz-skin.json`.
 - **Unique Agent Animations:** Each of the 5 characters has its own set of unique idle, walk, work, and reaction animations.
 - **Zero Friction Launch:** No dependencies to install — runs on the Bun runtime bundled with OpenCode. Launches a cross-platform, isolated Chrome "app" window using native OS calls. No heavy Electron needed.
 
@@ -94,7 +94,11 @@ Alternatively, copy `index.ts`, `core.ts` and the `visualizer/` folder into `.op
 
 Start (or restart) OpenCode. The plugin spins up a local server on `http://localhost:5173` and opens a Chrome app window automatically. If the browser doesn't open, visit the URL manually.
 
-Each running OpenCode instance appears as a pixel-art character in the office. When you close an instance, its character walks out. If the instance hosting the server is closed, a surviving instance picks up the server role automatically — no interruption.
+Every **chat session** gets its own pixel-art character, labelled at its desk with the session's title (so two chats in the same project, or a subagent's session, are two characters). A character appears when its session starts working, walks to a desk while it works, and goes for coffee when it finishes. Idle characters don't stand still: they leave the coffee machine, wander the rest area, scratch and yawn. A character walks out when its session is deleted or has been quiet for 10 minutes (a session that is still working is never removed for being quiet).
+
+The office has five desks and five skins, so at most five characters are shown; further sessions wait in line and walk in as others leave.
+
+If the instance hosting the server is closed, a surviving instance picks up the server role automatically — no interruption. Characters are decoration only: nothing here can affect your OpenCode session.
 
 ---
 
@@ -126,7 +130,13 @@ Then restart OpenCode — it will re-download the latest version from npm on sta
 
 ## 🎨 Customization (Skins)
 
-The plugin automatically assigns a random pixel art skin to each agent and saves it to `.opencode/viz-skin.json` in your project folder. You can manually edit this file to change skins.
+Skins are assigned automatically and the office makes sure characters look different. To pin a skin for every session in a project, create `.opencode/viz-skin.json` yourself:
+
+```json
+{ "skin": "person3" }
+```
+
+The plugin only ever reads this file; it never writes into your project.
 
 Available skins: `person1`, `person2`, `person3`, `person4`, `person5`.
 
@@ -163,3 +173,9 @@ npm test        # bun test — unit tests for the shared core and both adapters
 `index.ts` default-exports one object that serves both plugin APIs: OpenCode 2.x reads `id` + `setup(ctx)`, OpenCode 1.x calls `server()`. Each adapter only translates its version's events and hooks into calls on the shared `core.ts` (server connection, leader election, skins). See the [V1→V2 plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1).
 
 > `tui.ts` (the `/visualizer` command) currently targets the OpenCode 1.x TUI plugin API only.
+
+**Architecture.** `core.ts` holds one connection per process (shared by every project the OpenCode 2.x service hosts), the session registry and event de-duplication. `visualizer/ocv-server.ts` is the WebSocket hub, `visualizer/office.js` is the DOM-free simulation (state machine, idle life, message handling), and `visualizer/index.html` only renders. `shared.ts` holds what the plugin and server must agree on (port, protocol version, busy/idle rules); it is the only file both import.
+
+**Environment variables** (mainly for development and tests): `OCV_PORT` changes the port (default `5173`), `OCV_NO_BROWSER=1` stops the server from opening a browser window, and `OCV_SHUTDOWN_MS` changes how long an unused standalone server lingers.
+
+**Protocol.** Plugin → server: `hello`, `register {instanceId, cwd, skin, title, active}`, `title`, `event`, `unregister`. Server → frontend: `state.sync`, `instance.added`, `instance.title`, `instance.event`, `instance.removed`. Servers older than protocol 2 don't answer `hello`; the plugin then falls back to a single shared character so mixed versions keep working.

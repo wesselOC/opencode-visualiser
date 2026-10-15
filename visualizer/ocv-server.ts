@@ -3,14 +3,18 @@
 import { join } from "path"
 import { existsSync } from "fs"
 import { platform } from "os"
-
-const SERVER_PORT = 5173
+import { SERVER_PORT, PROTOCOL_VERSION, nextActive } from "../shared"
+export { nextActive }
 
 interface PluginClient {
   instanceId: string
-  ws: WebSocket
+  /** Identity of the owning socket (Bun's ServerWebSocket); only ever compared, never called. */
+  ws: unknown
   cwd: string
   skin: string
+  title: string
+  /** Last known busy/idle state, so a frontend that connects mid-run can start its characters at work. */
+  active: boolean
   connectedAt: number
 }
 
@@ -19,6 +23,15 @@ interface FrontendClient {
 }
 
 const pluginClients = new Map<string, PluginClient>()
+// Every connected plugin socket, including ones that currently host no session. The shutdown timer must look at
+// sockets, not sessions: a plugin with zero live sessions is still connected and will register new ones.
+const pluginSockets = new Set<unknown>()
+
+const MAX_ID = 128
+const MAX_TEXT = 300
+/** Untrusted input: only strings, bounded in length. */
+const text = (v: unknown, max = MAX_TEXT): string => (typeof v === "string" ? v.slice(0, max) : "")
+const idOf = (v: unknown): string | undefined => (typeof v === "string" && v.length > 0 && v.length <= MAX_ID ? v : undefined)
 const frontendClients = new Set<FrontendClient>()
 
 function broadcast(data: Record<string, unknown>) {
@@ -44,7 +57,7 @@ function trySpawn(cmd: string[], label: string): boolean {
 let browserLaunched = false
 
 function openBrowser() {
-  if (browserLaunched) return
+  if (browserLaunched || process.env.OCV_NO_BROWSER) return
   browserLaunched = true
   const url = `http://localhost:${SERVER_PORT}`
   const os = platform()
@@ -83,8 +96,9 @@ let server: ReturnType<typeof Bun.serve> | null = null
 function resetShutdownTimer() {
   if (shutdownTimer) clearTimeout(shutdownTimer)
   shutdownTimer = setTimeout(() => {
-    if (pluginClients.size === 0 && frontendClients.size === 0) {
-      server?.stop()
+    if (pluginSockets.size === 0 && frontendClients.size === 0) {
+      // stop(true) also drops any lingering sockets so their plugins notice and re-elect a leader.
+      server?.stop(true)
       // Clear the reference so startServer() can re-bind on a later call
       // (e.g. when a surviving instance takes over as the leader).
       server = null
@@ -92,7 +106,18 @@ function resetShutdownTimer() {
       // Only exit if running standalone, not in-process
       if (isStandalone) process.exit(0)
     }
-  }, 300_000)
+  }, Number(process.env.OCV_SHUTDOWN_MS) || 300_000)
+}
+
+/** Browsers always send Origin on WebSocket handshakes; plugins and tests (non-browser clients) send none. */
+export function originAllowed(origin: string | null): boolean {
+  if (!origin) return true
+  try {
+    const u = new URL(origin)
+    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname) && Number(u.port || (u.protocol === "https:" ? 443 : 80)) === SERVER_PORT
+  } catch {
+    return false
+  }
 }
 
 const VISUALIZER_DIR = join(import.meta.dir)
@@ -104,6 +129,10 @@ export function startServer(): boolean {
       port: SERVER_PORT,
       hostname: "127.0.0.1",
       async fetch(req) {
+        if (req.headers.get("upgrade")?.toLowerCase() === "websocket" && !originAllowed(req.headers.get("origin"))) {
+          // Any web page can open a WebSocket to localhost; only the visualizer page itself (and non-browser clients) may.
+          return new Response("Forbidden", { status: 403 })
+        }
         if (server!.upgrade(req)) return
         try {
           const url = new URL(req.url)
@@ -127,19 +156,35 @@ export function startServer(): boolean {
         message(ws, message) {
           let data: Record<string, unknown>
           try { data = JSON.parse(message as string) } catch { return }
+          if (typeof data !== "object" || data === null) return
 
           switch (data.type) {
+            case "hello": {
+              // Protocol handshake (v2+). Servers older than this ignore the message, which is how plugins detect them.
+              pluginSockets.add(ws)
+              ws.send(JSON.stringify({ type: "hello.ack", protocol: PROTOCOL_VERSION }))
+              resetShutdownTimer()
+              break
+            }
             case "register": {
-              const id = data.instanceId as string
-              pluginClients.set(id, {
+              const id = idOf(data.instanceId)
+              if (!id) return
+              pluginSockets.add(ws)
+              // A re-register (reconnect, new leader) may arrive from a new socket before the old one's close is seen;
+              // the new socket wins and the old socket's later close will not touch this entry (close checks ownership).
+              const client: PluginClient = {
                 instanceId: id,
                 ws,
-                cwd: (data.cwd as string) || "",
-                skin: (data.skin as string) || "",
+                cwd: text(data.cwd),
+                skin: text(data.skin, 20),
+                title: text(data.title),
+                active: data.active === true,
                 connectedAt: Date.now(),
-              })
-              broadcast({ type: "instance.added", instanceId: id, cwd: data.cwd, skin: data.skin })
-              ws.send(JSON.stringify({ type: "registered" }))
+              }
+              pluginClients.set(id, client)
+              broadcast({ type: "instance.added", instanceId: id, cwd: client.cwd, skin: client.skin, title: client.title })
+              ws.send(JSON.stringify({ type: "registered", protocol: PROTOCOL_VERSION }))
+              if (client.active) broadcast({ type: "instance.event", instanceId: id, event: { type: "session.status", status: { type: "busy" } } })
               openBrowser()
               resetShutdownTimer()
               break
@@ -150,22 +195,47 @@ export function startServer(): boolean {
                 instanceId: c.instanceId,
                 cwd: c.cwd,
                 skin: c.skin,
+                title: c.title,
+                active: c.active,
               }))
               ws.send(JSON.stringify({ type: "state.sync", instances }))
               break
             }
+            // The messages below act on a character, so only the socket that registered it may send them.
+            case "unregister": {
+              const id = idOf(data.instanceId)
+              if (id && pluginClients.get(id)?.ws === ws) {
+                pluginClients.delete(id)
+                broadcast({ type: "instance.removed", instanceId: id })
+              }
+              break
+            }
+            case "title": {
+              const id = idOf(data.instanceId)
+              const client = id ? pluginClients.get(id) : undefined
+              if (id && client?.ws === ws) {
+                client.title = text(data.title)
+                broadcast({ type: "instance.title", instanceId: id, title: client.title })
+              }
+              break
+            }
             case "event": {
-              broadcast({ type: "instance.event", instanceId: data.instanceId, event: data.event })
+              const id = idOf(data.instanceId)
+              const client = id ? pluginClients.get(id) : undefined
+              if (id && client?.ws === ws && typeof data.event === "object" && data.event !== null) {
+                client.active = nextActive(client.active, data.event as { type?: string; status?: unknown })
+                broadcast({ type: "instance.event", instanceId: id, event: data.event })
+              }
               break
             }
           }
         },
         close(ws) {
-          for (const [id, client] of pluginClients) {
+          pluginSockets.delete(ws)
+          for (const [id, client] of [...pluginClients]) {
             if (client.ws === ws) {
               pluginClients.delete(id)
               broadcast({ type: "instance.removed", instanceId: id })
-              break
             }
           }
           for (const client of frontendClients) {

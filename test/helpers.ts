@@ -2,12 +2,18 @@ import { mkdtempSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 
+/** The real WebSocket, captured before any test replaces the global with a fake. */
+export const RealWebSocket = globalThis.WebSocket
+
 /** Minimal stand-in for the global WebSocket that records everything sent and lets tests drive it. */
 export class FakeWebSocket {
   static instances: FakeWebSocket[] = []
   static readonly OPEN = 1
+  /** Set to false to simulate a server that predates per-session characters (it never answers `hello`). */
+  static ack = true
   readyState = 0
   sent: any[] = []
+  hellos = 0
   closed = false
   onopen: (() => void) | null = null
   onclose: (() => void) | null = null
@@ -23,7 +29,13 @@ export class FakeWebSocket {
     })
   }
   send(data: string) {
-    this.sent.push(JSON.parse(data))
+    const message = JSON.parse(data)
+    if (message.type === "hello") {
+      this.hellos++
+      if (FakeWebSocket.ack) queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: "hello.ack", protocol: 2 }) }))
+      return
+    }
+    this.sent.push(message)
   }
   close() {
     this.closed = true
@@ -34,8 +46,10 @@ export class FakeWebSocket {
 
 export function installFakeWebSocket() {
   FakeWebSocket.instances = []
+  FakeWebSocket.ack = true
   ;(globalThis as any).WebSocket = FakeWebSocket
 }
 
 export const tempDir = () => mkdtempSync(join(tmpdir(), "ocv-test-"))
+export const registered = (ws: FakeWebSocket) => ws.sent.filter((m) => m.type === "register")
 export const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms))
