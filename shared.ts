@@ -20,7 +20,11 @@ export function isActiveStatus(status: unknown): boolean {
   return type === "busy" || type === "retry"
 }
 
-/** Whether a session is working after `event`, given whether it was working before. Mirrors what the frontend animates. */
+/**
+ * Whether a session is working after `event`, given whether it was working before. Mirrors what the frontend animates.
+ * Tool events deliberately change nothing: a tool can report in after its run was interrupted, and that must not make a
+ * finished session look busy again. (A session first seen through a tool call is marked busy when it is created.)
+ */
 export function nextActive(current: boolean, event: { type?: string; status?: unknown } | undefined): boolean {
   if (!event) return current
   switch (event.type) {
@@ -29,9 +33,6 @@ export function nextActive(current: boolean, event: { type?: string; status?: un
       return false
     case "session.status":
       return isActiveStatus(event.status)
-    case "tool.execute.before":
-    case "tool.execute.after":
-      return true
     default:
       return current
   }

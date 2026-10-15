@@ -336,3 +336,44 @@ describe("old servers (protocol < 2, review m11)", () => {
     expect(FakeWebSocket.instances[0].sent[0]).toMatchObject({ type: "register", instanceId: "a", active: true })
   })
 })
+
+describe("handshake timing (review N2)", () => {
+  test("a hello.ack that arrives after the legacy timeout upgrades the connection to per-session characters", async () => {
+    FakeWebSocket.ack = false
+    const viz = start()
+    await tick(1700) // timed out -> legacy
+    viz.sendEvent("a", "session.status", { status: { type: "busy" } }, { register: true, directory: "/p" })
+    const ws = FakeWebSocket.instances[0]
+    expect(ws.sent.filter((m) => m.type === "register")[0].instanceId).toMatch(/^oc-/) // legacy
+    ws.onmessage?.({ data: JSON.stringify({ type: "hello.ack", protocol: 2 }) }) // the slow server finally answers
+    await tick(20)
+    expect(ws.sent).toContainEqual(expect.objectContaining({ type: "unregister", instanceId: expect.stringMatching(/^oc-/) })) // shared character retired
+    expect(ws.sent).toContainEqual(expect.objectContaining({ type: "register", instanceId: "a" }))
+    viz.sendEvent("b", "tool.execute.before", {}, { register: true })
+    expect(ws.sent.filter((m) => m.type === "register" && m.instanceId === "b")).toHaveLength(1)
+  })
+
+  test("a `registered` reply carrying protocol >= 2 also proves a new server", async () => {
+    FakeWebSocket.ack = false
+    const viz = start()
+    await tick(1700)
+    viz.sendEvent("a", "session.status", { status: { type: "busy" } }, { register: true, directory: "/p" })
+    FakeWebSocket.instances[0].onmessage?.({ data: JSON.stringify({ type: "registered", protocol: 2 }) })
+    await tick(20)
+    expect(FakeWebSocket.instances[0].sent).toContainEqual(expect.objectContaining({ type: "register", instanceId: "a" }))
+  })
+})
+
+describe("busy tracking (review N3)", () => {
+  test("a tool event after an idle does not mark the session busy again", async () => {
+    const viz = start()
+    await tick()
+    viz.sendEvent("s1", "session.status", { status: { type: "busy" } }, { register: true })
+    viz.sendEvent("s1", "session.idle")
+    viz.sendEvent("s1", "tool.execute.after", { tool: "bash" }) // interrupted tool reports late
+    FakeWebSocket.instances[0].close()
+    await tick(2600)
+    expect(FakeWebSocket.instances[1].sent[0]).toMatchObject({ type: "register", instanceId: "s1", active: false })
+  })
+})
+

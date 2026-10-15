@@ -184,7 +184,15 @@ function createHub({ directory: hubDirectory, startServer, idleRemoveMs = DEFAUL
       socket.onmessage = (e) => {
         try {
           const m = JSON.parse(String(e.data))
-          if (m.type === "hello.ack" && mode === "pending") settle("session")
+          const newServer = m.type === "hello.ack" || (m.type === "registered" && Number(m.protocol) >= 2)
+          if (!newServer) return
+          if (mode === "pending") settle("session")
+          else if (mode === "legacy") {
+            // A slow server answered after the handshake timed out: retire the shared character and switch over.
+            if (legacyRegistered) rawSend({ type: "unregister", instanceId: legacyId })
+            log("[plugin] Server turned out to support per-session characters; switching")
+            settle("session")
+          }
         } catch {}
       }
 
@@ -281,7 +289,7 @@ function createHub({ directory: hubDirectory, startServer, idleRemoveMs = DEFAUL
             if (title && sessions.get(sessionID) && !sessions.get(sessionID)!.title) setTitle(sessionID, title)
           })
           .catch(() => {})
-        s.busy = nextActive(false, { type: eventType, ...payload })
+        s.busy = true // created by activity (busy status or a tool call), so it is mid-run
         post(registerMessage(sessionID, s))
       } else {
         s.busy = nextActive(s.busy, { type: eventType, ...payload })

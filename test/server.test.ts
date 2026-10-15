@@ -177,9 +177,10 @@ describe("nextActive", () => {
     expect(nextActive(true, { type: "session.idle" })).toBe(false)
     expect(nextActive(true, { type: "session.error" })).toBe(false)
   })
-  test("tool events mean working (a session first seen through a tool call is mid-run); unknown events change nothing", () => {
-    expect(nextActive(false, { type: "tool.execute.before" })).toBe(true)
-    expect(nextActive(false, { type: "tool.execute.after" })).toBe(true)
+  test("tool events never flip the state (a late tool report after an idle must not mark the session busy again)", () => {
+    expect(nextActive(false, { type: "tool.execute.before" })).toBe(false)
+    expect(nextActive(false, { type: "tool.execute.after" })).toBe(false)
+    expect(nextActive(true, { type: "tool.execute.before" })).toBe(true)
     expect(nextActive(true, { type: "something.else" })).toBe(true)
     expect(nextActive(false, { type: "something.else" })).toBe(false)
     expect(nextActive(true, undefined)).toBe(true)
@@ -226,4 +227,19 @@ describe("auto-shutdown (review M2)", () => {
     expect(exited).toBe(true) // nobody connected any more -> it shuts down
     proc.kill()
   }, 15000)
+})
+
+describe("limits", () => {
+  test("the number of characters one server tracks is bounded", async () => {
+    const plugin = await connect()
+    for (let i = 0; i < 400; i++) plugin.send({ type: "register", instanceId: `bulk${i}`, cwd: "/p", skin: "person1" })
+    await tick(300)
+    const late = await connect()
+    late.send({ type: "frontend.register" })
+    await tick(100)
+    expect(late.got.find((m) => m.type === "state.sync")!.instances.filter((i: Msg) => i.instanceId.startsWith("bulk")).length).toBeLessThanOrEqual(200)
+    late.ws.close()
+    plugin.ws.close()
+    await tick(100)
+  })
 })

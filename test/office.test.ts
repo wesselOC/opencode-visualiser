@@ -282,3 +282,99 @@ describe("re-adding a character that is leaving, at every stage (review M3)", ()
     expect(o.agent("a")).toBeUndefined() // it left
   })
 })
+
+// ── second review ────────────────────────────────────────────────────────────
+describe("state.sync revives leaving characters (review N1)", () => {
+  test("after the server was away long enough for everyone to be sent home, a fresh state.sync brings them back", () => {
+    const o = loadOffice()
+    add(o, "a"); add(o, "b")
+    event(o, "a", busy)
+    o.step(15)
+    // frontend disconnect timer fired: everyone is sent home
+    o.msg({ type: "state.sync", instances: [] })
+    o.step(1)
+    expect(o.agent("a")!.leaving).toBe(true)
+    // new server announces the live sessions
+    o.msg({ type: "state.sync", instances: [{ instanceId: "a", cwd: "/p", skin: "person1", title: "A", active: true }, { instanceId: "b", cwd: "/p", skin: "person2", title: "B", active: false }] })
+    o.step(25)
+    expect(o.agent("a")).toBeDefined()
+    expect(o.agent("a")!.leaving).toBe(false)
+    expect(o.agent("a")!.opacity).toBe(1)
+    expect(o.agent("a")!.state).toBe("working") // active:true -> back to work
+    expect(o.agent("b")).toBeDefined()
+    expect(o.agent("b")!.leaving).toBe(false)
+  })
+})
+
+describe("work after an interrupted run (review N3)", () => {
+  test("a tool.execute.after that arrives after the run ended does not send the character back to work", () => {
+    const o = loadOffice()
+    add(o, "a")
+    event(o, "a", busy)
+    o.step(15)
+    event(o, "a", idle)
+    o.step(15)
+    expect(["coffee", "walking_to_coffee"]).toContain(o.agent("a")!.state)
+    event(o, "a", { type: "tool.execute.after", tool: "bash" }) // the interrupted tool reports in late
+    o.step(5)
+    expect(o.agent("a")!.state).not.toBe("working")
+    expect(o.agent("a")!.state).not.toBe("walking_to_desk")
+  })
+  test("a tool.execute.before still starts work", () => {
+    const o = loadOffice()
+    add(o, "a")
+    o.step(5)
+    event(o, "a", { type: "tool.execute.before", tool: "grep" })
+    o.step(15)
+    expect(o.agent("a")!.state).toBe("working")
+  })
+})
+
+describe("finishAfterError is cancelled by new work (review N4)", () => {
+  test("busy during the error animation keeps the character at its desk", () => {
+    const o = loadOffice()
+    add(o, "a", { skin: "person1" })
+    event(o, "a", busy)
+    o.step(15)
+    event(o, "a", { type: "session.error" })
+    event(o, "a", idle)
+    expect(o.agent("a")!.finishAfterError).toBe(true)
+    event(o, "a", busy) // retried / next turn
+    o.step(5)
+    expect(o.agent("a")!.state).toBe("working")
+  })
+})
+
+describe("working sessions are not stuck behind idle characters (review N6)", () => {
+  const fill = (o: ReturnType<typeof loadOffice>) => {
+    for (const id of ["a", "b", "c", "d", "e"]) add(o, id)
+    o.step(8)
+  }
+  test("a waiting session that becomes busy makes an idle character leave, and is the next one admitted", () => {
+    const o = loadOffice()
+    fill(o)
+    add(o, "idle-waiter") // waits first
+    add(o, "busy-waiter")
+    event(o, "busy-waiter", busy)
+    o.step(30)
+    expect(o.agent("busy-waiter")).toBeDefined()
+    expect(o.agent("idle-waiter")).toBeUndefined() // still waiting: it is not busy
+    expect(o.agents().length).toBe(5)
+  })
+  test("characters that are working are never evicted for a waiting session", () => {
+    const o = loadOffice()
+    fill(o)
+    for (const id of ["a", "b", "c", "d", "e"]) event(o, id, busy)
+    o.step(20)
+    add(o, "w"); event(o, "w", busy)
+    o.step(30)
+    expect(o.agent("w")).toBeUndefined()
+    expect(o.agents().filter((x) => x.leaving)).toEqual([])
+  })
+  test("the waiting list is bounded", () => {
+    const o = loadOffice()
+    fill(o)
+    for (let i = 0; i < 500; i++) add(o, `w${i}`)
+    expect(o.run("waiting.size")).toBeLessThanOrEqual(50)
+  })
+})

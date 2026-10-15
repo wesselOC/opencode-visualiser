@@ -16,7 +16,7 @@ describe("published package", () => {
     expect(sources.length).toBeGreaterThan(0)
     const missing: string[] = []
     for (const file of sources) {
-      for (const m of readFileSync(file, "utf-8").matchAll(/(?:import|export)[^"'\n]*from\s*["'](\.[^"']+)["']|import\(\s*["'](\.[^"']+)["']\s*\)/g)) {
+      for (const m of readFileSync(file, "utf-8").matchAll(/(?:import|export)\s[^;"']*?\sfrom\s*["'](\.[^"']+)["']|import\(\s*["'](\.[^"']+)["']\s*\)/g)) {
         const spec = m[1] ?? m[2]
         const base = resolve(dirname(file), spec)
         const target = [base, `${base}.ts`, `${base}.js`, join(base, "index.ts")].find((c) => existsSync(c) && statSync(c).isFile())

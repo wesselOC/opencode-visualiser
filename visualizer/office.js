@@ -159,6 +159,8 @@ let agentIdCounter = 0
 const agents = []
 const reservedCoffeeSpots = new Set()
 const MAX_AGENTS = 5
+const MAX_WAITING = 50
+let idleCounter = 0 // ordinal of when a character last became idle; the smallest has been idle the longest
 // Sessions that registered while the office was full, in arrival order. They are admitted as characters leave.
 const waiting = new Map()
 
@@ -189,7 +191,9 @@ function createAgent(instanceId, cwd, skin, title, active) {
     return existing
   }
   if (agents.length >= MAX_AGENTS) {
+    if (!waiting.has(instanceId) && waiting.size >= MAX_WAITING) waiting.delete(waiting.keys().next().value)
     waiting.set(instanceId, { cwd, skin, title, active: !!active })
+    evictIdleForBusyWaiting()
     return null
   }
   waiting.delete(instanceId)
@@ -225,6 +229,7 @@ function createAgent(instanceId, cwd, skin, title, active) {
     leaving: false,
     pendingWork: !!active, // joined mid-run: go straight to work once they have walked in
     finishAfterError: false,
+    idleSince: ++idleCounter,
     workActionTimer: 3 + Math.random() * 7,
     workActionAnim: null,
     workActionReverse: false,
@@ -256,11 +261,25 @@ function reviveAgent(a) {
 
 // Fills free slots from the waiting list (called whenever a character has left).
 function admitWaiting() {
-  for (const [instanceId, w] of [...waiting]) {
+  // Sessions that are working are shown before idle ones; otherwise arrival order.
+  const queue = [...waiting].sort((x, y) => Number(y[1].active) - Number(x[1].active))
+  for (const [instanceId, w] of queue) {
     if (agents.length >= MAX_AGENTS) break
     waiting.delete(instanceId)
     createAgent(instanceId, w.cwd, w.skin, w.title, w.active)
   }
+}
+
+// A session that is working while the office is full of idle characters must not wait up to 10 minutes: send the one
+// that has been idle longest home. Characters that are working (or about to) are never evicted.
+function evictIdleForBusyWaiting() {
+  if (agents.length < MAX_AGENTS) return
+  if (![...waiting.values()].some(w => w.active)) return
+  if (agents.some(a => a.leaving)) return // a slot is already on its way
+  const idle = agents.filter(a => !a.leaving && !a.pendingWork && a.deskIndex < 0 && ["rest_area", "coffee", "walking_to_coffee", "standing", "walking"].includes(a.state))
+  if (!idle.length) return
+  idle.sort((x, y) => x.idleSince - y.idleSince)
+  removeAgent(idle[0].instanceId)
 }
 
 function clearRestAction(a) {
@@ -361,6 +380,7 @@ function stepRestAction(a, dt) {
 
 function assignAgentWork(a) {
   if (a.leaving) return // on its way out: the session is gone
+  a.finishAfterError = false // the run continues: do not send the character off when the error animation ends
   if (a.state === "working" || a.state === "sitting" || a.state === "error") return
   clearRestAction(a)
   // Still fading in at the door (a session registers and starts work in the same instant): start once it has walked in.
@@ -402,6 +422,7 @@ function assignAgentWork(a) {
 function finishWork(a) {
   a.pendingWork = false
   if (a.leaving) return
+  a.idleSince = ++idleCounter
   switch (a.state) {
     case "error":
       a.finishAfterError = true // the error animation finishes first
@@ -788,7 +809,11 @@ function applyMessage(data) {
       for (const inst of instances) {
         const existing = agents.find(a => a.instanceId === inst.instanceId)
         if (!existing) createAgent(inst.instanceId, inst.cwd, inst.skin, inst.title, inst.active)
-        else if (inst.title) existing.title = str(inst.title)
+        else {
+          if (inst.title) existing.title = str(inst.title)
+          if (existing.leaving) reviveAgent(existing) // e.g. the server was away long enough for everyone to be sent home
+          if (inst.active) assignAgentWork(existing)
+        }
       }
       break
     }
@@ -814,7 +839,8 @@ function applyMessage(data) {
         if (w) {
           if (evt.type === "session.idle" || evt.type === "session.error") w.active = false
           else if (evt.type === "session.status") w.active = evt.status?.type === "busy" || evt.status?.type === "retry" || evt.status === "busy"
-          else if (evt.type === "tool.execute.before" || evt.type === "tool.execute.after") w.active = true
+          else if (evt.type === "tool.execute.before") w.active = true
+          if (w.active) evictIdleForBusyWaiting()
         }
         break
       }
@@ -835,8 +861,7 @@ function applyMessage(data) {
             a.animTimer = 0
           }
           break
-        case "tool.execute.after":
-        case "tool.execute.before":
+        case "tool.execute.before": // not .after: a tool can report in late, after its run was interrupted
           if (a.state === "rest_area" || a.state === "coffee" || a.state === "walking_to_coffee" || a.state === "walking" || a.state === "spawning") {
             if (a.coffeeSpot >= 0) { reservedCoffeeSpots.delete(a.coffeeSpot); a.coffeeSpot = -1 }
             assignAgentWork(a)

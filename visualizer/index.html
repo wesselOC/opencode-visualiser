@@ -172,14 +172,12 @@ function loop(time) {
   const dt = Math.min((time - lastTime) / 1000, 0.1)
   lastTime = time
 
-  // Schedule the next frame first, and isolate this one: a bad frame must never stop the animation for good.
+  // Schedule the next frame first, and isolate each step: one bad agent must never freeze the others or stop the loop.
   requestAnimationFrame(loop)
-  try {
-    for (let i = agents.length - 1; i >= 0; i--) updateAgent(agents[i], dt)
-    drawAll()
-  } catch (e) {
-    console.error("[viz] frame error", e)
+  for (let i = agents.length - 1; i >= 0; i--) {
+    try { updateAgent(agents[i], dt) } catch (e) { if (!agents[i].failed) console.error("[viz] agent error", agents[i].instanceId, e); agents[i].failed = true }
   }
+  try { drawAll() } catch (e) { console.error("[viz] draw error", e) }
 }
 
 // ============================================================

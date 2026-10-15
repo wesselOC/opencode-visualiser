@@ -27,6 +27,7 @@ const pluginClients = new Map<string, PluginClient>()
 // sockets, not sessions: a plugin with zero live sessions is still connected and will register new ones.
 const pluginSockets = new Set<unknown>()
 
+const MAX_CLIENTS = 200
 const MAX_ID = 128
 const MAX_TEXT = 300
 /** Untrusted input: only strings, bounded in length. */
@@ -170,6 +171,7 @@ export function startServer(): boolean {
               const id = idOf(data.instanceId)
               if (!id) return
               pluginSockets.add(ws)
+              if (!pluginClients.has(id) && pluginClients.size >= MAX_CLIENTS) return // a local client cannot grow the table without bound
               // A re-register (reconnect, new leader) may arrive from a new socket before the old one's close is seen;
               // the new socket wins and the old socket's later close will not touch this entry (close checks ownership).
               const client: PluginClient = {
